@@ -24,11 +24,39 @@ namespace Emqo.NoNameTag.Services
         /// </summary>
         public static SteamPlayer GetSteamPlayer(CSteamID steamId)
         {
-            foreach (var client in Provider.clients)
+            if (steamId == CSteamID.Nil || steamId.m_SteamID == 0)
+                return null;
+
+            try
             {
-                if (client?.playerID != null && client.playerID.steamID == steamId)
-                    return client;
+                var player = PlayerTool.getSteamPlayer(steamId);
+                if (player != null)
+                    return player;
             }
+            catch
+            {
+                // Fall back to the Provider.clients snapshot below. Some runtime builds can
+                // throw while player state is being connected/disconnected.
+            }
+
+            var clients = Provider.clients;
+            if (clients == null)
+                return null;
+
+            foreach (var client in clients)
+            {
+                try
+                {
+                    var playerId = client?.playerID;
+                    if (playerId != null && playerId.steamID == steamId)
+                        return client;
+                }
+                catch
+                {
+                    // Ignore transient partial client entries.
+                }
+            }
+
             return null;
         }
 

@@ -28,9 +28,10 @@ namespace Emqo.NoNameTag.Services
             if (string.IsNullOrEmpty(formatted.Message))
                 return false;
 
+            var sent = false;
             foreach (var recipient in ResolveRecipients(request))
             {
-                _sender.Send(new ChatMessageDispatch
+                sent |= _sender.Send(new ChatMessageDispatch
                 {
                     Sender = request.Sender,
                     Recipient = recipient,
@@ -40,7 +41,7 @@ namespace Emqo.NoNameTag.Services
                 });
             }
 
-            return true;
+            return sent;
         }
 
         public ChatFormattedMessage BuildFormattedMessage(ChatMessageParticipant sender, string message, ChatMessageMode chatMode)
@@ -74,32 +75,46 @@ namespace Emqo.NoNameTag.Services
         private IEnumerable<ChatMessageParticipant> ResolveRecipients(ChatMessageRequest request)
         {
             var recipients = request.Recipients ?? Array.Empty<ChatMessageParticipant>();
+            var sender = request.Sender;
 
             switch (request.ChatMode)
             {
                 case ChatMessageMode.Local:
+                    if (sender != null)
+                        yield return sender;
+
                     foreach (var recipient in recipients)
                     {
                         if (recipient == null)
                             continue;
+                        if (HasSameSteamId(recipient, sender))
+                            continue;
 
-                        var distanceSqr = recipient.Position.DistanceSquaredTo(request.Sender.Position);
+                        var distanceSqr = recipient.Position.DistanceSquaredTo(sender.Position);
                         if (distanceSqr <= LocalChatRangeSqr)
                             yield return recipient;
                     }
                     yield break;
 
                 case ChatMessageMode.Group:
-                    if (request.Sender.GroupId == 0)
+                    if (sender == null)
+                        yield break;
+
+                    yield return sender;
+
+                    if (sender.GroupId == 0)
                     {
-                        yield return request.Sender;
                         yield break;
                     }
 
                     foreach (var recipient in recipients)
                     {
-                        if (recipient != null && recipient.GroupId == request.Sender.GroupId)
+                        if (recipient != null
+                            && !HasSameSteamId(recipient, sender)
+                            && recipient.GroupId == sender.GroupId)
+                        {
                             yield return recipient;
+                        }
                     }
                     yield break;
 
@@ -107,6 +122,13 @@ namespace Emqo.NoNameTag.Services
                     yield return null;
                     yield break;
             }
+        }
+
+        private static bool HasSameSteamId(ChatMessageParticipant left, ChatMessageParticipant right)
+        {
+            return left?.SteamId > 0
+                && right?.SteamId > 0
+                && left.SteamId == right.SteamId;
         }
 
         private static string GetModePrefix(ChatMessageMode chatMode)

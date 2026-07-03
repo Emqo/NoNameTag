@@ -73,6 +73,45 @@ namespace Emqo.NoNameTag.Tests
         }
 
         [Fact]
+        public void GroupChat_WhenSnapshotOmitsSender_StillSendsBackToSender()
+        {
+            var group = 42UL;
+            var sender = Participant(1, "Alice", group, Position(0, 0, 0));
+            var sameGroup = Participant(2, "Bob", group, Position(0, 0, 0));
+            var senderSpy = new SpyChatMessageSender();
+            var service = CreateService(senderSpy);
+
+            service.HandleChat(new ChatMessageRequest
+            {
+                Sender = sender,
+                Recipients = new[] { sameGroup },
+                Message = "hello",
+                ChatMode = ChatMessageMode.Group
+            });
+
+            Assert.Equal(new ulong[] { 1, 2 }, senderSpy.Dispatches.Select(d => d.Recipient.SteamId).ToArray());
+        }
+
+        [Fact]
+        public void LocalChat_WhenSnapshotOmitsSender_StillSendsBackToSender()
+        {
+            var sender = Participant(1, "Alice", 0UL, Position(0, 0, 0));
+            var near = Participant(2, "Near", 0UL, Position(10, 0, 0));
+            var senderSpy = new SpyChatMessageSender();
+            var service = CreateService(senderSpy);
+
+            service.HandleChat(new ChatMessageRequest
+            {
+                Sender = sender,
+                Recipients = new[] { near },
+                Message = "hello",
+                ChatMode = ChatMessageMode.Local
+            });
+
+            Assert.Equal(new ulong[] { 1, 2 }, senderSpy.Dispatches.Select(d => d.Recipient.SteamId).ToArray());
+        }
+
+        [Fact]
         public void GlobalChat_UsesBroadcastDelivery()
         {
             var sender = Participant(1, "Alice", 0UL, Position(0, 0, 0));
@@ -91,6 +130,24 @@ namespace Emqo.NoNameTag.Tests
             Assert.Null(dispatch.Recipient);
             Assert.Equal(ChatMessageMode.Global, dispatch.ChatMode);
             Assert.Equal("[VIP] Alice: hello", dispatch.Message);
+        }
+
+        [Fact]
+        public void HandleChat_ReturnsFalseWhenRuntimeSenderDoesNotSend()
+        {
+            var sender = Participant(1, "Alice", 0UL, Position(0, 0, 0));
+            var senderSpy = new SpyChatMessageSender { SendResult = false };
+            var service = CreateService(senderSpy);
+
+            var handled = service.HandleChat(new ChatMessageRequest
+            {
+                Sender = sender,
+                Message = "hello",
+                ChatMode = ChatMessageMode.Global
+            });
+
+            Assert.False(handled);
+            Assert.Single(senderSpy.Dispatches);
         }
 
         [Fact]
@@ -145,10 +202,12 @@ namespace Emqo.NoNameTag.Tests
         private sealed class SpyChatMessageSender : IChatMessageSender
         {
             public List<ChatMessageDispatch> Dispatches { get; } = new List<ChatMessageDispatch>();
+            public bool SendResult { get; set; } = true;
 
-            public void Send(ChatMessageDispatch dispatch)
+            public bool Send(ChatMessageDispatch dispatch)
             {
                 Dispatches.Add(dispatch);
+                return SendResult;
             }
         }
 

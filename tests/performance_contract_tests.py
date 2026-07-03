@@ -51,8 +51,9 @@ def test_group_chat_does_not_wrap_each_client_as_unturned_player():
     chat_service = read("Services/ChatMessageService.cs")
     body = extract_method(plugin, "GetChatParticipants")
     assert "UnturnedPlayer.FromSteamPlayer(client)" not in body
-    assert "client.player.quests.groupID" in body
-    assert "request.Sender.GroupId" in chat_service
+    assert "TryCreateChatParticipant(client, out var participant)" in body
+    assert "TryGetGroupId(runtimePlayer)" in plugin
+    assert "sender.GroupId" in chat_service
 
 
 def test_chat_event_short_circuits_before_recipient_snapshot():
@@ -70,26 +71,60 @@ def test_chat_sanitization_uses_single_pass_helper():
     assert ".Replace(\"<\", \"\")" not in body
 
 
-def test_chat_sender_steam_player_is_cached_per_message():
+def test_chat_sender_steam_player_lookup_is_isolated_to_runtime_sender():
     plugin = read("NoNameTagPlugin.cs")
     runtime_sender = read("Services/RuntimeChatMessageSender.cs")
     chatted_body = extract_method(plugin, "OnPlayerChatted")
     assert "player.SteamPlayer()" not in chatted_body
     assert "RuntimeSteamPlayer" not in plugin
-    assert "BroadcastHelper.GetSteamPlayer(new CSteamID(dispatch.Sender.SteamId))" not in runtime_sender
+    assert "ResolveSteamPlayer(dispatch.Sender)" in runtime_sender
+    assert "BroadcastHelper.GetSteamPlayer(new CSteamID(participant.SteamId))" in runtime_sender
 
 
-def test_runtime_chat_sender_uses_server_sender_slot_for_replayed_chat():
+def test_runtime_chat_sender_preserves_player_avatar_through_raw_chat_packet():
     runtime_sender = read("Services/RuntimeChatMessageSender.cs")
     send_body = extract_method(runtime_sender, "Send")
-    assert "dispatch.Recipient == null" in send_body
-    assert "EChatMode.GLOBAL" in send_body
-    assert "EChatMode.SAY" in send_body
-    assert "ChatManager.serverSendMessage(" in send_body
-    assert "Color.white,\n                null,\n                recipient," in send_body
-    assert "ToRuntimeMode" not in runtime_sender
-    assert "GetSteamPlayer(new CSteamID(dispatch.Sender.SteamId))" not in runtime_sender
-    assert "dispatch.Recipient?.SteamId > 0 && recipient == null" in send_body
+    assert "TrySendRawChatEntry(dispatch, runtimeMode)" in send_body
+    assert "ResolveSteamPlayer(dispatch.Sender)" in send_body
+    assert "HasPlayerId(sender)" in send_body
+    raw_body = extract_method(runtime_sender, "TrySendRawChatEntry")
+    assert "ResolveSpeakerSteamId(dispatch)" in raw_body
+    assert "GetCurrentRecipients()" in raw_body
+    assert "ResolveTransportConnection(dispatch.Recipient, resolvedRecipient)" in raw_body
+    raw_send_body = extract_method(runtime_sender, "TrySendRawToConnection")
+    assert "speakerSteamId" in raw_send_body
+    assert "connection" in raw_send_body
+    assert "dispatch.Message" in raw_send_body
+    assert "dispatch.AvatarUrl ?? string.Empty" in raw_send_body
+    assert "RememberedPlayers" in runtime_sender
+    assert "RememberedConnections" in runtime_sender
+    assert "RememberPlayer" in runtime_sender
+    assert "RememberRuntimePlayer" in runtime_sender
+    group_self_body = extract_method(runtime_sender, "IsGroupSelfEcho")
+    assert "dispatch?.ChatMode == ChatMessageMode.Group" in group_self_body
+    assert "IsSelfRecipient(dispatch)" in group_self_body
+    self_recipient_body = extract_method(runtime_sender, "IsSelfRecipient")
+    assert "dispatch.Sender.SteamId == dispatch.Recipient.SteamId" in self_recipient_body
+    runtime_mode_body = extract_method(runtime_sender, "ToRuntimeMode")
+    assert "case ChatMessageMode.Group:" in runtime_mode_body
+    assert "return EChatMode.GROUP;" in runtime_mode_body
+    assert "Group self echo sent via raw chat packet" in runtime_sender
+    chat_manager_body = extract_method(runtime_sender, "TrySendViaChatManager")
+    assert "sender," in chat_manager_body
+    assert "recipient," in chat_manager_body
+    assert "return true;" in chat_manager_body
+    assert "return false;" in chat_manager_body
+    assert "catch (Exception ex)" in chat_manager_body
+
+
+def test_chat_participant_snapshot_uses_null_guard_helpers():
+    plugin = read("NoNameTagPlugin.cs")
+    snapshot_body = extract_method(plugin, "GetChatParticipants")
+    assert "TryCreateChatParticipant(client, out var participant)" in snapshot_body
+    assert "client.player.channel?.owner?.playerID" not in snapshot_body
+    assert "client.player.quests == null" not in snapshot_body
+    assert "TryGetGroupId" in plugin
+    assert "TryGetPosition" in plugin
 
 
 def test_formatted_name_cache_cleanup_includes_formatted_only_entries():
@@ -119,6 +154,7 @@ def test_player_disconnect_releases_player_stats_cache():
     plugin = read("NoNameTagPlugin.cs")
     body = extract_method(plugin, "CleanupPlayerData")
     assert "PlayerStatsService?.ReleasePlayer(player.CSteamID.m_SteamID)" in body
+    assert "RuntimeChatMessageSender.ForgetPlayer(player.CSteamID.m_SteamID)" in body
 
 
 def test_release_player_keeps_dirty_cache_when_flush_fails():
@@ -204,8 +240,8 @@ def test_ci_and_release_workflows_run_stage1_tests_before_build_or_publish():
     assert "ILRepack.Lib.MSBuild.Task" in read("NoNameTag.csproj")
 
 
-def test_stage2_version_is_1_1_4():
-    assert "<Version>1.1.4</Version>" in read("NoNameTag.csproj")
+def test_stage2_version_is_1_1_18():
+    assert "<Version>1.1.18</Version>" in read("NoNameTag.csproj")
 
 
 def test_stage2_chat_service_and_sender_seam_are_wired():
@@ -272,15 +308,30 @@ def test_death_message_does_not_call_unturned_player_from_player_without_runtime
     handle_body = extract_method(death_service, "HandlePlayerDeath")
     create_body = extract_method(death_service, "TryCreateUnturnedPlayer")
     assert "UnturnedPlayer.FromPlayer(sender.player)" not in handle_body
-    assert "var owner = player?.channel?.owner" in create_body
-    assert "owner == null || owner.player == null || owner.playerID == null" in create_body
+    assert "var player = sender?.player" in create_body
+    assert "player == null" in create_body
     assert "UnturnedPlayer.FromPlayer(player)" in create_body
+    assert "catch (Exception ex)" in create_body
+
+
+def test_death_handler_uses_pre_dead_rocket_legacy_event():
+    plugin = read("NoNameTagPlugin.cs")
+    register_body = extract_method(plugin, "RegisterEventHandlers")
+    unregister_body = extract_method(plugin, "UnregisterEventHandlers")
+    assert "PlayerLife.RocketLegacyOnDeath += OnPlayerDied" in register_body
+    assert "PlayerLife.RocketLegacyOnDeath -= OnPlayerDied" in unregister_body
+    assert "PlayerLife.onPlayerDied += OnPlayerDied" not in register_body
+    assert "PlayerLife.onPlayerDied -= OnPlayerDied" not in unregister_body
 
 
 def test_broadcast_helper_handles_clients_with_missing_player_id():
     helper = read("Services/BroadcastHelper.cs")
     body = extract_method(helper, "GetSteamPlayer")
-    assert "client?.playerID != null && client.playerID.steamID == steamId" in body
+    assert "PlayerTool.getSteamPlayer(steamId)" in body
+    assert "var clients = Provider.clients" in body
+    assert "var playerId = client?.playerID" in body
+    assert "playerId != null && playerId.steamID == steamId" in body
+    assert body.count("catch") >= 2
 
 
 def test_litedb_is_merged_into_plugin_release_build():

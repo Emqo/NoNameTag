@@ -59,6 +59,7 @@ namespace Emqo.NoNameTag
                 PlayerStatsService?.Dispose();
                 NameTagManager?.ClearAll();
                 PermissionService?.ClearAllCache();
+                RuntimeChatMessageSender.ClearRememberedPlayers();
                 UnityMainThreadDispatcher.DestroyInstance();
                 Instance = null;
                 Logger.Info($"{Name} has been unloaded!");
@@ -77,7 +78,7 @@ namespace Emqo.NoNameTag
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
             PlayerLife.OnTellBleeding_Global += OnPlayerBleedingUpdated;
             PlayerLife.OnRevived_Global += OnPlayerRevived;
-            PlayerLife.onPlayerDied += OnPlayerDied;
+            PlayerLife.RocketLegacyOnDeath += OnPlayerDied;
         }
 
         private void UnregisterEventHandlers()
@@ -88,7 +89,7 @@ namespace Emqo.NoNameTag
             DamageTool.damagePlayerRequested -= OnDamagePlayerRequested;
             PlayerLife.OnTellBleeding_Global -= OnPlayerBleedingUpdated;
             PlayerLife.OnRevived_Global -= OnPlayerRevived;
-            PlayerLife.onPlayerDied -= OnPlayerDied;
+            PlayerLife.RocketLegacyOnDeath -= OnPlayerDied;
         }
 
         private void RefreshAllDisplays()
@@ -187,6 +188,7 @@ namespace Emqo.NoNameTag
             BroadcastService?.SendLeaveMessage(player);
             DamageAttributionService?.ClearVictim(player.CSteamID.m_SteamID);
             PlayerStatsService?.ReleasePlayer(player.CSteamID.m_SteamID);
+            RuntimeChatMessageSender.ForgetPlayer(player.CSteamID.m_SteamID);
             NameTagManager.RemoveDisplayEffect(player);
             PermissionService?.ClearPlayerCache(player.CSteamID.m_SteamID);
         }
@@ -217,11 +219,11 @@ namespace Emqo.NoNameTag
                     return;
 
                 cancel = true;
-                Logger.Debug($"Chat message - Player: {player?.DisplayName}, SteamID: {player?.CSteamID.m_SteamID}, ChatMode: {chatMode}", LogCategory.Plugin);
+                Logger.Debug($"Chat message - Player: {TryGetDisplayName(player)}, SteamID: {TryGetSteamId(player)}, ChatMode: {chatMode}", LogCategory.Plugin);
             }
             catch (Exception ex)
             {
-                Logger.Exception(ex, $"Error handling chat message from {player?.DisplayName}");
+                Logger.Exception(ex, $"Error handling chat message from {TryGetDisplayName(player)}");
             }
         }
 
@@ -260,12 +262,19 @@ namespace Emqo.NoNameTag
             if (player == null)
                 return null;
 
+            var steamId = TryGetSteamId(player);
+            if (steamId == 0)
+                return null;
+
+            var runtimePlayer = TryGetRuntimePlayer(player);
+            RuntimeChatMessageSender.RememberRuntimePlayer(steamId, runtimePlayer);
+            RuntimeChatMessageSender.RememberPlayer(steamId, TryGetSteamPlayerOwner(runtimePlayer));
             return new ChatMessageParticipant
             {
-                SteamId = player.CSteamID.m_SteamID,
-                DisplayName = player.DisplayName,
-                GroupId = player.Player?.quests == null ? 0UL : player.Player.quests.groupID.m_SteamID,
-                Position = ToChatPosition(player.Player?.transform?.position ?? Vector3.zero)
+                SteamId = steamId,
+                DisplayName = TryGetDisplayName(player),
+                GroupId = TryGetGroupId(runtimePlayer),
+                Position = TryGetPosition(runtimePlayer)
             };
         }
 
@@ -274,25 +283,119 @@ namespace Emqo.NoNameTag
             var participants = new System.Collections.Generic.List<ChatMessageParticipant>();
             foreach (var client in Provider.clients)
             {
-                if (client?.player == null)
+                if (!TryCreateChatParticipant(client, out var participant))
                     continue;
 
-                var steamId = client.player.channel?.owner?.playerID.steamID.m_SteamID ?? 0UL;
-                if (steamId == 0)
-                    continue;
-
-                participants.Add(new ChatMessageParticipant
-                {
-                    SteamId = steamId,
-                    DisplayName = client.player.channel?.owner?.playerID.characterName,
-                    GroupId = client.player.quests == null ? 0UL : client.player.quests.groupID.m_SteamID,
-                    Position = ToChatPosition(client.player.transform?.position ?? Vector3.zero)
-                });
+                participants.Add(participant);
             }
 
             return participants;
         }
 
+        private static bool TryCreateChatParticipant(SteamPlayer client, out ChatMessageParticipant participant)
+        {
+            participant = null;
+
+            try
+            {
+                var runtimePlayer = client?.player;
+                if (runtimePlayer == null)
+                    return false;
+
+                var playerId = client.playerID ?? runtimePlayer.channel?.owner?.playerID;
+                if (playerId == null || playerId.steamID == CSteamID.Nil || playerId.steamID.m_SteamID == 0)
+                    return false;
+
+                RuntimeChatMessageSender.RememberPlayer(playerId.steamID.m_SteamID, client);
+                participant = new ChatMessageParticipant
+                {
+                    SteamId = playerId.steamID.m_SteamID,
+                    DisplayName = playerId.characterName,
+                    GroupId = TryGetGroupId(runtimePlayer),
+                    Position = TryGetPosition(runtimePlayer)
+                };
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"Skipped invalid chat recipient snapshot: {ex.Message}", LogCategory.Plugin);
+                return false;
+            }
+        }
+
+        private static ulong TryGetSteamId(UnturnedPlayer player)
+        {
+            try
+            {
+                return player?.CSteamID.m_SteamID ?? 0UL;
+            }
+            catch
+            {
+                return 0UL;
+            }
+        }
+
+        private static string TryGetDisplayName(UnturnedPlayer player)
+        {
+            try
+            {
+                return player?.DisplayName ?? player?.CharacterName ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static Player TryGetRuntimePlayer(UnturnedPlayer player)
+        {
+            try
+            {
+                return player?.Player;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static SteamPlayer TryGetSteamPlayerOwner(Player player)
+        {
+            try
+            {
+                return player?.channel?.owner;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static ulong TryGetGroupId(Player player)
+        {
+            try
+            {
+                var quests = player?.quests;
+                return quests == null ? 0UL : quests.groupID.m_SteamID;
+            }
+            catch
+            {
+                return 0UL;
+            }
+        }
+
+        private static ChatMessagePosition TryGetPosition(Player player)
+        {
+            try
+            {
+                var transform = player?.transform;
+                return ToChatPosition(transform == null ? Vector3.zero : transform.position);
+            }
+            catch
+            {
+                return ToChatPosition(Vector3.zero);
+            }
+        }
 
         private static ChatMessagePosition ToChatPosition(Vector3 position)
         {

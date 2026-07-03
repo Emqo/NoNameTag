@@ -61,9 +61,12 @@ namespace Emqo.NoNameTag.Services
         {
             try
             {
+                var owner = sender?.channel?.owner;
+                if (owner?.player != null)
+                    return UnturnedPlayer.FromSteamPlayer(owner);
+
                 var player = sender?.player;
-                var owner = player?.channel?.owner;
-                if (owner == null || owner.player == null || owner.playerID == null)
+                if (player == null)
                     return null;
 
                 return UnturnedPlayer.FromPlayer(player);
@@ -404,29 +407,36 @@ namespace Emqo.NoNameTag.Services
             if (displayMode == DisplayMode.Chat || displayMode == DisplayMode.Both)
                 SendDeathMessageToChat(message, visibility, victim, killer);
 
-            Logger.Debug($"Death message broadcasted: {message} (DisplayMode: {displayMode}, Visibility: {visibility})", LogCategory.DeathMessage);
+            Logger.Info($"Death message broadcasted: {BroadcastHelper.StripRichText(message)} (DisplayMode: {displayMode}, Visibility: {visibility})", LogCategory.DeathMessage);
         }
 
         private void SendDeathMessageToChat(string message, DeathMessageVisibility visibility, UnturnedPlayer victim, UnturnedPlayer killer)
         {
-            switch (visibility)
+            try
             {
-                case DeathMessageVisibility.All:
-                    ChatManager.serverSendMessage(message, Color.white, null, null, EChatMode.GLOBAL, null, true);
-                    break;
+                switch (visibility)
+                {
+                    case DeathMessageVisibility.All:
+                        ChatManager.serverSendMessage(message, Color.white, null, null, EChatMode.GLOBAL, null, true);
+                        break;
 
-                case DeathMessageVisibility.KillerOnly:
-                    SendToPlayer(killer, message);
-                    break;
+                    case DeathMessageVisibility.KillerOnly:
+                        SendToPlayer(killer, message);
+                        break;
 
-                case DeathMessageVisibility.VictimOnly:
-                    SendToPlayer(victim, message);
-                    break;
+                    case DeathMessageVisibility.VictimOnly:
+                        SendToPlayer(victim, message);
+                        break;
 
-                case DeathMessageVisibility.KillerAndVictimOnly:
-                    SendToPlayer(killer, message);
-                    SendToPlayer(victim, message);
-                    break;
+                    case DeathMessageVisibility.KillerAndVictimOnly:
+                        SendToPlayer(killer, message);
+                        SendToPlayer(victim, message);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Failed to send death message to chat: {ex}", LogCategory.DeathMessage);
             }
         }
 
