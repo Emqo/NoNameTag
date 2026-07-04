@@ -53,15 +53,25 @@ def test_group_chat_does_not_wrap_each_client_as_unturned_player():
     assert "UnturnedPlayer.FromSteamPlayer(client)" not in body
     assert "TryCreateChatParticipant(client, out var participant)" in body
     assert "TryGetGroupId(runtimePlayer)" in plugin
-    assert "sender.GroupId" in chat_service
+    assert "recipient.CanReceiveGroupChat" in chat_service
+
+
+def test_group_chat_uses_runtime_group_membership_snapshot():
+    plugin = read("NoNameTagPlugin.cs")
+    chat_service = read("Services/ChatMessageService.cs")
+    assert "GetGroupChatParticipants(senderRuntimePlayer, senderSteamId)" in plugin
+    assert "candidate?.quests?.isMemberOfSameGroupAs(sender)" in plugin
+    assert "participant.CanReceiveGroupChat = true" in plugin
+    assert "recipient.GroupId == sender.GroupId" not in chat_service
+    assert "sender.GroupId == 0" not in chat_service
 
 
 def test_chat_event_short_circuits_before_recipient_snapshot():
     plugin = read("NoNameTagPlugin.cs")
     body = extract_method(plugin, "OnPlayerChatted")
     assert "if (!ShouldHandleChatEvent(player, message, cancel))" in body
-    assert body.index("ShouldHandleChatEvent") < body.index("GetChatParticipants")
-    assert "Recipients = RequiresRecipientSnapshot(mode) ? GetChatParticipants() : null" in body
+    assert body.index("ShouldHandleChatEvent") < body.index("GetRecipientsForMode")
+    assert "Recipients = GetRecipientsForMode(mode, runtimePlayer, sender?.SteamId ?? 0UL)" in body
 
 
 def test_chat_sanitization_uses_single_pass_helper():
@@ -240,8 +250,8 @@ def test_ci_and_release_workflows_run_stage1_tests_before_build_or_publish():
     assert "ILRepack.Lib.MSBuild.Task" in read("NoNameTag.csproj")
 
 
-def test_stage2_version_is_1_1_18():
-    assert "<Version>1.1.18</Version>" in read("NoNameTag.csproj")
+def test_stage2_version_is_1_1_19():
+    assert "<Version>1.1.19</Version>" in read("NoNameTag.csproj")
 
 
 def test_stage2_chat_service_and_sender_seam_are_wired():

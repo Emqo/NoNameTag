@@ -35,6 +35,7 @@ namespace Emqo.NoNameTag.Services
         public ulong SteamId { get; set; }
         public string DisplayName { get; set; }
         public ulong GroupId { get; set; }
+        public bool CanReceiveGroupChat { get; set; }
         public ChatMessagePosition Position { get; set; }
     }
 

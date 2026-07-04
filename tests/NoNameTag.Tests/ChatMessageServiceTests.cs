@@ -34,7 +34,7 @@ namespace Emqo.NoNameTag.Tests
         {
             var group = 42UL;
             var sender = Participant(1, "Alice", group, Position(0, 0, 0));
-            var sameGroup = Participant(2, "Bob", group, Position(0, 0, 0));
+            var sameGroup = Participant(2, "Bob", group, Position(0, 0, 0), canReceiveGroupChat: true);
             var otherGroup = Participant(3, "Eve", 43UL, Position(0, 0, 0));
             var senderSpy = new SpyChatMessageSender();
             var service = CreateService(senderSpy);
@@ -55,7 +55,7 @@ namespace Emqo.NoNameTag.Tests
         public void GroupChatWithoutGroup_SendsOnlyToSender()
         {
             var sender = Participant(1, "Alice", 0UL, Position(0, 0, 0));
-            var other = Participant(2, "Bob", 0UL, Position(0, 0, 0));
+            var other = Participant(2, "Bob", 0UL, Position(0, 0, 0), canReceiveGroupChat: false);
             var senderSpy = new SpyChatMessageSender();
             var service = CreateService(senderSpy);
 
@@ -77,7 +77,7 @@ namespace Emqo.NoNameTag.Tests
         {
             var group = 42UL;
             var sender = Participant(1, "Alice", group, Position(0, 0, 0));
-            var sameGroup = Participant(2, "Bob", group, Position(0, 0, 0));
+            var sameGroup = Participant(2, "Bob", group, Position(0, 0, 0), canReceiveGroupChat: true);
             var senderSpy = new SpyChatMessageSender();
             var service = CreateService(senderSpy);
 
@@ -182,13 +182,19 @@ namespace Emqo.NoNameTag.Tests
             };
         }
 
-        private static ChatMessageParticipant Participant(ulong steamId, string displayName, ulong groupId, ChatMessagePosition position)
+        private static ChatMessageParticipant Participant(
+            ulong steamId,
+            string displayName,
+            ulong groupId,
+            ChatMessagePosition position,
+            bool canReceiveGroupChat = false)
         {
             return new ChatMessageParticipant
             {
                 SteamId = steamId,
                 DisplayName = displayName,
                 GroupId = groupId,
+                CanReceiveGroupChat = canReceiveGroupChat,
                 Position = position
             };
         }

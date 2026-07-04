@@ -206,10 +206,12 @@ namespace Emqo.NoNameTag
             try
             {
                 var mode = ToChatMessageMode(chatMode);
+                var runtimePlayer = TryGetRuntimePlayer(player);
+                var sender = CreateChatParticipant(player, runtimePlayer);
                 var handled = ChatMessageService?.HandleChat(new ChatMessageRequest
                 {
-                    Sender = CreateChatParticipant(player),
-                    Recipients = RequiresRecipientSnapshot(mode) ? GetChatParticipants() : null,
+                    Sender = sender,
+                    Recipients = GetRecipientsForMode(mode, runtimePlayer, sender?.SteamId ?? 0UL),
                     Message = message,
                     ChatMode = mode,
                     IsCanceled = cancel
@@ -242,6 +244,20 @@ namespace Emqo.NoNameTag
             return mode == ChatMessageMode.Local || mode == ChatMessageMode.Group;
         }
 
+        private static System.Collections.Generic.IReadOnlyList<ChatMessageParticipant> GetRecipientsForMode(
+            ChatMessageMode mode,
+            Player senderRuntimePlayer,
+            ulong senderSteamId)
+        {
+            if (!RequiresRecipientSnapshot(mode))
+                return null;
+
+            if (mode == ChatMessageMode.Group)
+                return GetGroupChatParticipants(senderRuntimePlayer, senderSteamId);
+
+            return GetChatParticipants();
+        }
+
         private static ChatMessageMode ToChatMessageMode(EChatMode chatMode)
         {
             switch (chatMode)
@@ -259,6 +275,11 @@ namespace Emqo.NoNameTag
 
         private ChatMessageParticipant CreateChatParticipant(UnturnedPlayer player)
         {
+            return CreateChatParticipant(player, TryGetRuntimePlayer(player));
+        }
+
+        private ChatMessageParticipant CreateChatParticipant(UnturnedPlayer player, Player runtimePlayer)
+        {
             if (player == null)
                 return null;
 
@@ -266,7 +287,6 @@ namespace Emqo.NoNameTag
             if (steamId == 0)
                 return null;
 
-            var runtimePlayer = TryGetRuntimePlayer(player);
             RuntimeChatMessageSender.RememberRuntimePlayer(steamId, runtimePlayer);
             RuntimeChatMessageSender.RememberPlayer(steamId, TryGetSteamPlayerOwner(runtimePlayer));
             return new ChatMessageParticipant
@@ -286,6 +306,26 @@ namespace Emqo.NoNameTag
                 if (!TryCreateChatParticipant(client, out var participant))
                     continue;
 
+                participants.Add(participant);
+            }
+
+            return participants;
+        }
+
+        private static System.Collections.Generic.IReadOnlyList<ChatMessageParticipant> GetGroupChatParticipants(
+            Player senderRuntimePlayer,
+            ulong senderSteamId)
+        {
+            var participants = new System.Collections.Generic.List<ChatMessageParticipant>();
+            foreach (var client in Provider.clients)
+            {
+                if (!TryCreateChatParticipant(client, out var participant))
+                    continue;
+
+                if (!IsSenderOrGroupMember(client.player, senderRuntimePlayer, participant, senderSteamId))
+                    continue;
+
+                participant.CanReceiveGroupChat = true;
                 participants.Add(participant);
             }
 
@@ -319,6 +359,26 @@ namespace Emqo.NoNameTag
             catch (Exception ex)
             {
                 Logger.Debug($"Skipped invalid chat recipient snapshot: {ex.Message}", LogCategory.Plugin);
+                return false;
+            }
+        }
+
+        private static bool IsSenderOrGroupMember(
+            Player candidate,
+            Player sender,
+            ChatMessageParticipant candidateParticipant,
+            ulong senderSteamId)
+        {
+            if (candidateParticipant?.SteamId > 0 && senderSteamId > 0 && candidateParticipant.SteamId == senderSteamId)
+                return true;
+
+            try
+            {
+                return candidate?.quests?.isMemberOfSameGroupAs(sender) == true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"Skipped group chat recipient membership check: {ex.Message}", LogCategory.Plugin);
                 return false;
             }
         }

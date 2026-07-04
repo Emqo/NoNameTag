@@ -102,16 +102,11 @@ namespace Emqo.NoNameTag.Services
 
                     yield return sender;
 
-                    if (sender.GroupId == 0)
-                    {
-                        yield break;
-                    }
-
                     foreach (var recipient in recipients)
                     {
                         if (recipient != null
                             && !HasSameSteamId(recipient, sender)
-                            && recipient.GroupId == sender.GroupId)
+                            && recipient.CanReceiveGroupChat)
                         {
                             yield return recipient;
                         }
