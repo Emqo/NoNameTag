@@ -46,32 +46,37 @@ def test_damage_handler_resolves_attacker_player_once():
     assert "ResolveHitDistanceMeters(parameters, attacker" in body
 
 
-def test_group_chat_does_not_wrap_each_client_as_unturned_player():
+def test_chat_uses_native_unturned_routing_instead_of_manual_recipient_replay():
     plugin = read("NoNameTagPlugin.cs")
-    chat_service = read("Services/ChatMessageService.cs")
-    body = extract_method(plugin, "GetChatParticipants")
-    assert "UnturnedPlayer.FromSteamPlayer(client)" not in body
-    assert "TryCreateChatParticipant(client, out var participant)" in body
-    assert "TryGetGroupId(runtimePlayer)" in plugin
-    assert "recipient.CanReceiveGroupChat" in chat_service
+    register_body = extract_method(plugin, "RegisterEventHandlers")
+    unregister_body = extract_method(plugin, "UnregisterEventHandlers")
+    assert "ChatManager.onChatted += OnRuntimeChatted" in register_body
+    assert "ChatManager.onServerFormattingMessage += OnServerFormattingChatMessage" in register_body
+    assert "ChatManager.onChatted -= OnRuntimeChatted" in unregister_body
+    assert "ChatManager.onServerFormattingMessage -= OnServerFormattingChatMessage" in unregister_body
+    assert "UnturnedPlayerEvents.OnPlayerChatted" not in plugin
+    assert "GetRecipientsForMode" not in plugin
+    assert "GetGroupChatParticipants" not in plugin
 
 
-def test_group_chat_uses_runtime_group_membership_snapshot():
+def test_group_chat_uses_unturned_native_group_delivery():
     plugin = read("NoNameTagPlugin.cs")
-    chat_service = read("Services/ChatMessageService.cs")
-    assert "GetGroupChatParticipants(senderRuntimePlayer, senderSteamId)" in plugin
-    assert "candidate?.quests?.isMemberOfSameGroupAs(sender)" in plugin
-    assert "participant.CanReceiveGroupChat = true" in plugin
-    assert "recipient.GroupId == sender.GroupId" not in chat_service
-    assert "sender.GroupId == 0" not in chat_service
+    formatter_body = extract_method(plugin, "OnServerFormattingChatMessage")
+    rich_body = extract_method(plugin, "OnRuntimeChatted")
+    assert "ChatMessageService?.BuildFormattedMessage" in formatter_body
+    assert "ChatMessageService?.HandleChat" not in plugin
+    assert "cancel = true" not in plugin
+    assert "isRich = true" in rich_body
+    assert "ApplyVanillaChatFormatting(mode, ref text)" in formatter_body
+    assert 'case EChatMode.GROUP:' in extract_method(plugin, "ApplyVanillaChatFormatting")
 
 
-def test_chat_event_short_circuits_before_recipient_snapshot():
+def test_chat_event_short_circuits_before_enabling_rich_text():
     plugin = read("NoNameTagPlugin.cs")
-    body = extract_method(plugin, "OnPlayerChatted")
-    assert "if (!ShouldHandleChatEvent(player, message, cancel))" in body
-    assert body.index("ShouldHandleChatEvent") < body.index("GetRecipientsForMode")
-    assert "Recipients = GetRecipientsForMode(mode, runtimePlayer, sender?.SteamId ?? 0UL)" in body
+    body = extract_method(plugin, "OnRuntimeChatted")
+    assert "if (!ShouldHandleRuntimeChatEvent(player, message, isVisible))" in body
+    assert body.index("ShouldHandleRuntimeChatEvent") < body.index("isRich = true")
+    assert "message.StartsWith(\"/\", StringComparison.Ordinal)" in extract_method(plugin, "ShouldHandleRuntimeChatEvent")
 
 
 def test_chat_sanitization_uses_single_pass_helper():
@@ -84,9 +89,10 @@ def test_chat_sanitization_uses_single_pass_helper():
 def test_chat_sender_steam_player_lookup_is_isolated_to_runtime_sender():
     plugin = read("NoNameTagPlugin.cs")
     runtime_sender = read("Services/RuntimeChatMessageSender.cs")
-    chatted_body = extract_method(plugin, "OnPlayerChatted")
-    assert "player.SteamPlayer()" not in chatted_body
+    formatter_body = extract_method(plugin, "OnServerFormattingChatMessage")
+    assert "player.SteamPlayer()" not in formatter_body
     assert "RuntimeSteamPlayer" not in plugin
+    assert "TryCreateChatParticipant(speaker, out var sender)" in formatter_body
     assert "ResolveSteamPlayer(dispatch.Sender)" in runtime_sender
     assert "BroadcastHelper.GetSteamPlayer(new CSteamID(participant.SteamId))" in runtime_sender
 
@@ -129,8 +135,8 @@ def test_runtime_chat_sender_preserves_player_avatar_through_raw_chat_packet():
 
 def test_chat_participant_snapshot_uses_null_guard_helpers():
     plugin = read("NoNameTagPlugin.cs")
-    snapshot_body = extract_method(plugin, "GetChatParticipants")
-    assert "TryCreateChatParticipant(client, out var participant)" in snapshot_body
+    snapshot_body = extract_method(plugin, "TryCreateChatParticipant")
+    assert "var runtimePlayer = client?.player" in snapshot_body
     assert "client.player.channel?.owner?.playerID" not in snapshot_body
     assert "client.player.quests == null" not in snapshot_body
     assert "TryGetGroupId" in plugin
@@ -250,8 +256,8 @@ def test_ci_and_release_workflows_run_stage1_tests_before_build_or_publish():
     assert "ILRepack.Lib.MSBuild.Task" in read("NoNameTag.csproj")
 
 
-def test_stage2_version_is_1_1_19():
-    assert "<Version>1.1.19</Version>" in read("NoNameTag.csproj")
+def test_stage2_version_is_1_1_20():
+    assert "<Version>1.1.20</Version>" in read("NoNameTag.csproj")
 
 
 def test_stage2_chat_service_and_sender_seam_are_wired():
@@ -267,9 +273,9 @@ def test_stage2_chat_service_and_sender_seam_are_wired():
     assert "ChatMessageService = new ChatMessageService" in plugin
     assert "new RuntimeChatMessageSender()" in plugin
     assert "using Rocket.Unturned.Player" not in read("tests/NoNameTag.Tests/ChatMessageServiceTests.cs")
-    chatted_body = extract_method(plugin, "OnPlayerChatted")
-    assert "ChatMessageService?.HandleChat" in chatted_body
-    assert "ChatManager.serverSendMessage" not in chatted_body
+    formatter_body = extract_method(plugin, "OnServerFormattingChatMessage")
+    assert "ChatMessageService?.BuildFormattedMessage" in formatter_body
+    assert "ChatManager.serverSendMessage" not in formatter_body
 
 
 def test_stage2_death_attribution_resolved_once_and_shared():

@@ -2,7 +2,6 @@ using Emqo.NoNameTag.Services;
 using Emqo.NoNameTag.Utilities;
 using Rocket.Core.Plugins;
 using Rocket.Unturned;
-using Rocket.Unturned.Events;
 using Rocket.Unturned.Player;
 using SDG.Unturned;
 using Steamworks;
@@ -74,7 +73,8 @@ namespace Emqo.NoNameTag
         {
             U.Events.OnPlayerConnected += OnPlayerConnected;
             U.Events.OnPlayerDisconnected += OnPlayerDisconnected;
-            UnturnedPlayerEvents.OnPlayerChatted += OnPlayerChatted;
+            ChatManager.onChatted += OnRuntimeChatted;
+            ChatManager.onServerFormattingMessage += OnServerFormattingChatMessage;
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
             PlayerLife.OnTellBleeding_Global += OnPlayerBleedingUpdated;
             PlayerLife.OnRevived_Global += OnPlayerRevived;
@@ -85,7 +85,8 @@ namespace Emqo.NoNameTag
         {
             U.Events.OnPlayerConnected -= OnPlayerConnected;
             U.Events.OnPlayerDisconnected -= OnPlayerDisconnected;
-            UnturnedPlayerEvents.OnPlayerChatted -= OnPlayerChatted;
+            ChatManager.onChatted -= OnRuntimeChatted;
+            ChatManager.onServerFormattingMessage -= OnServerFormattingChatMessage;
             DamageTool.damagePlayerRequested -= OnDamagePlayerRequested;
             PlayerLife.OnTellBleeding_Global -= OnPlayerBleedingUpdated;
             PlayerLife.OnRevived_Global -= OnPlayerRevived;
@@ -198,64 +199,82 @@ namespace Emqo.NoNameTag
             Logger.Debug($"Player disconnected: {player.DisplayName}");
         }
 
-        private void OnPlayerChatted(UnturnedPlayer player, ref Color color, string message, EChatMode chatMode, ref bool cancel)
+        private void OnRuntimeChatted(SteamPlayer player, EChatMode chatMode, ref Color color, ref bool isRich, string message, ref bool isVisible)
         {
-            if (!ShouldHandleChatEvent(player, message, cancel))
+            if (!ShouldHandleRuntimeChatEvent(player, message, isVisible))
                 return;
+
+            // Formatting is applied later by ChatManager.onServerFormattingMessage.
+            // Keep Unturned's native routing for global/local/group chat, but allow
+            // our formatted name rich-text tags to render.
+            color = Color.white;
+            isRich = true;
+        }
+
+        private void OnServerFormattingChatMessage(SteamPlayer speaker, EChatMode mode, ref string text)
+        {
+            if (!ShouldFormatServerChatMessage(speaker, text))
+            {
+                ApplyVanillaChatFormatting(mode, ref text);
+                return;
+            }
 
             try
             {
-                var mode = ToChatMessageMode(chatMode);
-                var runtimePlayer = TryGetRuntimePlayer(player);
-                var sender = CreateChatParticipant(player, runtimePlayer);
-                var handled = ChatMessageService?.HandleChat(new ChatMessageRequest
+                if (!TryCreateChatParticipant(speaker, out var sender))
                 {
-                    Sender = sender,
-                    Recipients = GetRecipientsForMode(mode, runtimePlayer, sender?.SteamId ?? 0UL),
-                    Message = message,
-                    ChatMode = mode,
-                    IsCanceled = cancel
-                }) == true;
-
-                if (!handled)
+                    ApplyVanillaChatFormatting(mode, ref text);
                     return;
+                }
 
-                cancel = true;
-                Logger.Debug($"Chat message - Player: {TryGetDisplayName(player)}, SteamID: {TryGetSteamId(player)}, ChatMode: {chatMode}", LogCategory.Plugin);
+                var formatted = ChatMessageService?.BuildFormattedMessage(sender, text, ToChatMessageMode(mode));
+                if (formatted == null || string.IsNullOrEmpty(formatted.Message))
+                {
+                    ApplyVanillaChatFormatting(mode, ref text);
+                    return;
+                }
+
+                text = formatted.Message;
+                Logger.Debug($"Chat message formatted through native route - Player: {sender.DisplayName}, SteamID: {sender.SteamId}, ChatMode: {mode}", LogCategory.Plugin);
             }
             catch (Exception ex)
             {
-                Logger.Exception(ex, $"Error handling chat message from {TryGetDisplayName(player)}");
+                Logger.Exception(ex, $"Error formatting chat message from {TryGetSteamId(speaker)}");
+                ApplyVanillaChatFormatting(mode, ref text);
             }
         }
 
-        private bool ShouldHandleChatEvent(UnturnedPlayer player, string message, bool cancel)
+        private bool ShouldHandleRuntimeChatEvent(SteamPlayer player, string message, bool isVisible)
         {
             return Configuration.Instance.Enabled
                 && Configuration.Instance.ApplyToChatMessages
                 && player != null
-                && !cancel
+                && isVisible
                 && !string.IsNullOrEmpty(message)
                 && !message.StartsWith("/", StringComparison.Ordinal);
         }
 
-        private static bool RequiresRecipientSnapshot(ChatMessageMode mode)
+        private bool ShouldFormatServerChatMessage(SteamPlayer player, string message)
         {
-            return mode == ChatMessageMode.Local || mode == ChatMessageMode.Group;
+            return Configuration.Instance.Enabled
+                && Configuration.Instance.ApplyToChatMessages
+                && player != null
+                && !string.IsNullOrEmpty(message)
+                && !message.StartsWith("/", StringComparison.Ordinal);
         }
 
-        private static System.Collections.Generic.IReadOnlyList<ChatMessageParticipant> GetRecipientsForMode(
-            ChatMessageMode mode,
-            Player senderRuntimePlayer,
-            ulong senderSteamId)
+        private static void ApplyVanillaChatFormatting(EChatMode mode, ref string text)
         {
-            if (!RequiresRecipientSnapshot(mode))
-                return null;
-
-            if (mode == ChatMessageMode.Group)
-                return GetGroupChatParticipants(senderRuntimePlayer, senderSteamId);
-
-            return GetChatParticipants();
+            text = "%SPEAKER%: " + text;
+            switch (mode)
+            {
+                case EChatMode.LOCAL:
+                    text = "[A] " + text;
+                    break;
+                case EChatMode.GROUP:
+                    text = "[G] " + text;
+                    break;
+            }
         }
 
         private static ChatMessageMode ToChatMessageMode(EChatMode chatMode)
@@ -271,65 +290,6 @@ namespace Emqo.NoNameTag
                 default:
                     return ChatMessageMode.Global;
             }
-        }
-
-        private ChatMessageParticipant CreateChatParticipant(UnturnedPlayer player)
-        {
-            return CreateChatParticipant(player, TryGetRuntimePlayer(player));
-        }
-
-        private ChatMessageParticipant CreateChatParticipant(UnturnedPlayer player, Player runtimePlayer)
-        {
-            if (player == null)
-                return null;
-
-            var steamId = TryGetSteamId(player);
-            if (steamId == 0)
-                return null;
-
-            RuntimeChatMessageSender.RememberRuntimePlayer(steamId, runtimePlayer);
-            RuntimeChatMessageSender.RememberPlayer(steamId, TryGetSteamPlayerOwner(runtimePlayer));
-            return new ChatMessageParticipant
-            {
-                SteamId = steamId,
-                DisplayName = TryGetDisplayName(player),
-                GroupId = TryGetGroupId(runtimePlayer),
-                Position = TryGetPosition(runtimePlayer)
-            };
-        }
-
-        private static System.Collections.Generic.IReadOnlyList<ChatMessageParticipant> GetChatParticipants()
-        {
-            var participants = new System.Collections.Generic.List<ChatMessageParticipant>();
-            foreach (var client in Provider.clients)
-            {
-                if (!TryCreateChatParticipant(client, out var participant))
-                    continue;
-
-                participants.Add(participant);
-            }
-
-            return participants;
-        }
-
-        private static System.Collections.Generic.IReadOnlyList<ChatMessageParticipant> GetGroupChatParticipants(
-            Player senderRuntimePlayer,
-            ulong senderSteamId)
-        {
-            var participants = new System.Collections.Generic.List<ChatMessageParticipant>();
-            foreach (var client in Provider.clients)
-            {
-                if (!TryCreateChatParticipant(client, out var participant))
-                    continue;
-
-                if (!IsSenderOrGroupMember(client.player, senderRuntimePlayer, participant, senderSteamId))
-                    continue;
-
-                participant.CanReceiveGroupChat = true;
-                participants.Add(participant);
-            }
-
-            return participants;
         }
 
         private static bool TryCreateChatParticipant(SteamPlayer client, out ChatMessageParticipant participant)
@@ -363,31 +323,23 @@ namespace Emqo.NoNameTag
             }
         }
 
-        private static bool IsSenderOrGroupMember(
-            Player candidate,
-            Player sender,
-            ChatMessageParticipant candidateParticipant,
-            ulong senderSteamId)
-        {
-            if (candidateParticipant?.SteamId > 0 && senderSteamId > 0 && candidateParticipant.SteamId == senderSteamId)
-                return true;
-
-            try
-            {
-                return candidate?.quests?.isMemberOfSameGroupAs(sender) == true;
-            }
-            catch (Exception ex)
-            {
-                Logger.Debug($"Skipped group chat recipient membership check: {ex.Message}", LogCategory.Plugin);
-                return false;
-            }
-        }
-
         private static ulong TryGetSteamId(UnturnedPlayer player)
         {
             try
             {
                 return player?.CSteamID.m_SteamID ?? 0UL;
+            }
+            catch
+            {
+                return 0UL;
+            }
+        }
+
+        private static ulong TryGetSteamId(SteamPlayer player)
+        {
+            try
+            {
+                return player?.playerID?.steamID.m_SteamID ?? 0UL;
             }
             catch
             {
@@ -404,30 +356,6 @@ namespace Emqo.NoNameTag
             catch
             {
                 return string.Empty;
-            }
-        }
-
-        private static Player TryGetRuntimePlayer(UnturnedPlayer player)
-        {
-            try
-            {
-                return player?.Player;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static SteamPlayer TryGetSteamPlayerOwner(Player player)
-        {
-            try
-            {
-                return player?.channel?.owner;
-            }
-            catch
-            {
-                return null;
             }
         }
 
